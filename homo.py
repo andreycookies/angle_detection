@@ -132,10 +132,14 @@ def detect_sheet_angle_no_homography(warped_mask: np.ndarray) -> float:
         right = size - w - left
         return cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
     warped_mask_cropped = pad_to_size(warped_mask_cropped, target_size)
+    cv2.imwrite("warped_mask_cropped.png", warped_mask_cropped)
     template_mask_cropped = pad_to_size(template_mask_cropped, target_size)
+    cv2.imwrite("template_mask_cropped.png", template_mask_cropped)
 
     # 3. Создаем новые src и dst, помещая кропы в центр черного квадрата
     src = np.float32(pad_to_size(warped_mask_cropped, target_size))
+    cv2.imwrite("template_mask_cropped.png", template_mask_cropped)
+
     dst = np.float32(pad_to_size(template_mask_cropped, target_size))
     # --- КОНЕЦ ВСТАВКИ ---
 

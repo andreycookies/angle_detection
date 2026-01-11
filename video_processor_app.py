@@ -47,7 +47,7 @@ class VideoProcessorApp:
         else:
             print("⚠️  CUDA not available, using CPU")
         
-        json_path = r".\video_homo.json"
+        json_path = r".\frames_homo.json"
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
             H = np.array(data["homography_matrix"], dtype=np.float64)
@@ -407,125 +407,23 @@ class VideoProcessorApp:
             sleep_time = max(0, frame_delay - processing_time)
             time.sleep(sleep_time)
 
-    # def process_frame_with_yolo(self, frame):
-    #     """
-    #     Версия что выдает 25 фпс
-    #     🔥 Архитектурно правильный пайплайн:
-    #     1) YOLO на уменьшенном оригинальном кадре
-    #     2) Масштабирование bbox обратно
-    #     3) Homography ТОЛЬКО для координат
-    #     """
-    #
-    #     if self.handled_model is None:
-    #         return frame
-    #
-    #     t0 = time.time()
-    #
-    #     try:
-    #         # ================================
-    #         # 1️⃣ Resize ДЛЯ YOLO (КРИТИЧНО)
-    #         # ================================
-    #         H0, W0 = frame.shape[:2]
-    #         YOLO_SIZE = 960  # 640 / 960 / 1280
-    #
-    #         scale = YOLO_SIZE / max(H0, W0)
-    #         new_w = int(W0 * scale)
-    #         new_h = int(H0 * scale)
-    #
-    #         small = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-    #
-    #         # ================================
-    #         # 2️⃣ YOLO inference (GPU)
-    #         # ================================
-    #         tensor = torch.from_numpy(small).to(
-    #             self.device, non_blocking=True
-    #         ).float().div_(255.0)
-    #
-    #         tensor = tensor.permute(2, 0, 1).unsqueeze(0)
-    #
-    #         # padding до кратности 32
-    #         pad_h = (32 - tensor.shape[2] % 32) % 32
-    #         pad_w = (32 - tensor.shape[3] % 32) % 32
-    #         tensor = torch.nn.functional.pad(tensor, (0, pad_w, 0, pad_h))
-    #
-    #         with torch.no_grad(), torch.amp.autocast('cuda'):
-    #             results = self.handled_model(tensor, verbose=False)
-    #
-    #         if len(results) == 0 or results[0].boxes is None:
-    #             return frame
-    #
-    #         # ================================
-    #         # 3️⃣ Масштабируем bbox обратно
-    #         # ================================
-    #         boxes = results[0].boxes.xyxy.clone()
-    #
-    #         boxes[:, [0, 2]] *= (W0 / new_w)
-    #         boxes[:, [1, 3]] *= (H0 / new_h)
-    #
-    #         boxes_cpu = boxes.cpu().numpy().astype(int)
-    #
-    #         # ================================
-    #         # 4️⃣ Homography ТОЛЬКО для bbox
-    #         # ================================
-    #         centers = []
-    #         for x1, y1, x2, y2 in boxes_cpu:
-    #             cx = (x1 + x2) * 0.5
-    #             cy = (y1 + y2) * 0.5
-    #             centers.append([cx, cy])
-    #
-    #             # Рисуем bbox
-    #             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
-    #
-    #         if centers:
-    #             pts = np.array(centers, dtype=np.float32).reshape(-1, 1, 2)
-    #             world_pts = cv2.perspectiveTransform(pts, self.H)
-    #
-    #             # Отображаем точки в мировых координатах (пример)
-    #             for (cx, cy), (wx, wy) in zip(centers, world_pts.reshape(-1, 2)):
-    #                 cv2.putText(
-    #                     frame,
-    #                     f"({int(wx)}, {int(wy)})",
-    #                     (int(cx), int(cy)),
-    #                     cv2.FONT_HERSHEY_SIMPLEX,
-    #                     0.6,
-    #                     (0, 0, 255),
-    #                     2
-    #                 )
-    #
-    #         # ================================
-    #         # 5️⃣ Статистика
-    #         # ================================
-    #         infer_time = time.time() - t0
-    #         self.inference_times.append(infer_time)
-    #         avg_inf = sum(self.inference_times) / len(self.inference_times)
-    #
-    #         self.update_statistics(
-    #             angle=0,
-    #             fps=self.display_fps_5s,
-    #             inference_time=avg_inf
-    #         )
-    #
-    #         return frame
-    #
-    #     except Exception as e:
-    #         print(f"❌ process_frame_with_yolo error: {e}")
-    #         import traceback
-    #         traceback.print_exc()
-    #         return frame
-
     def process_frame_with_yolo(self, frame):
         if self.handled_model is None or self.raw_model is None:
             return frame
 
         try:
+            # ИСХОДНЫЙ КАДР
             image = frame.copy()
+            cv2.imwrite("image.png", image)
 
-            # ===== YOLO INFERENCE (GPU SAFE) =====
+            warped_image = self.warp_with_homography_keep_size(image, self.H)
+            cv2.imwrite("warped_image.png", warped_image)
+
             with torch.no_grad(), torch.amp.autocast("cuda"):
                 results = self.handled_model(
-                    image,
+                    warped_image,
                     imgsz=960,
-                    device="cuda",
+                    device=self.device,
                     verbose=False
                 )
 
@@ -537,17 +435,23 @@ class VideoProcessorApp:
             if masks.shape[0] != 1:
                 return image
 
+            # ИСХОДНАЯ МАСКА
             mask = masks[0]
             binary_mask = (mask > 0).astype(np.uint8)
+            cv2.imwrite("mask.png", binary_mask * 255)
 
-            # ===== твоя обработка маски =====
+
+            # ОБРАБОТАННАЯ МАСКА
             m = mask_preprocessing(binary_mask)
+            cv2.imwrite("processed_mask.png", m * 255)
 
             if has_no_ones(m):
                 return image
 
+            # ИЗМЕНЕННАЯ МАСКА
             h, w = image.shape[:2]
             resized_mask = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
+            cv2.imwrite("resized_mask.png", resized_mask*255)
 
             approx4, _ = find_4_points(resized_mask)
             angle = detect_sheet_angle_no_homography(resized_mask)
@@ -559,7 +463,7 @@ class VideoProcessorApp:
                 raw_results = self.raw_model(
                     image,
                     imgsz=960,
-                    device="cuda",
+                    device=self.device,
                     verbose=False
                 )
 
@@ -573,6 +477,8 @@ class VideoProcessorApp:
                 x1, y1, x2, y2 = map(int, box)
                 cv2.rectangle(image, (x1, y1), (x2, y2), (0, 0, 255), 5)
 
+            # BOXED КАДР
+            cv2.imwrite("boxed_image.png", image)
             return image
 
         except Exception as e:
@@ -682,6 +588,75 @@ class VideoProcessorApp:
                 except:
                     pass
                 self.display_queue.put(processed)
+
+    def warp_with_homography_keep_size(
+            self,
+            image: np.ndarray,
+            H: np.ndarray,
+            interpolation=cv2.INTER_LINEAR
+    ) -> np.ndarray:
+        """
+        Применяет гомографию H так, чтобы:
+        - размер изображения остался прежним
+        - всё преобразованное содержимое было видно
+        - допускается масштабирование (потеря качества)
+
+        image: входное изображение (H, W, C)
+        H: 3x3 матрица гомографии
+        """
+
+        h, w = image.shape[:2]
+
+        # 1. Углы исходного изображения
+        corners = np.array([
+            [0, 0],
+            [w - 1, 0],
+            [w - 1, h - 1],
+            [0, h - 1]
+        ], dtype=np.float32)
+
+        corners = corners.reshape(-1, 1, 2)
+
+        # 2. Применяем гомографию к углам
+        warped_corners = cv2.perspectiveTransform(corners, H)
+
+        xs = warped_corners[:, 0, 0]
+        ys = warped_corners[:, 0, 1]
+
+        min_x, max_x = xs.min(), xs.max()
+        min_y, max_y = ys.min(), ys.max()
+
+        warped_width = max_x - min_x
+        warped_height = max_y - min_y
+
+        # 3. Масштаб, чтобы всё влезло в исходный размер
+        scale = min(w / warped_width, h / warped_height)
+
+        # 4. Центрирование
+        tx = -min_x * scale + (w - warped_width * scale) / 2
+        ty = -min_y * scale + (h - warped_height * scale) / 2
+
+        # 5. Матрица "вписывания"
+        fit_matrix = np.array([
+            [scale, 0, tx],
+            [0, scale, ty],
+            [0, 0, 1]
+        ], dtype=np.float64)
+
+        # 6. Итоговая гомография
+        H_final = fit_matrix @ H
+
+        # 7. Warp с сохранением размера
+        warped = cv2.warpPerspective(
+            image,
+            H_final,
+            (w, h),
+            flags=interpolation,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0
+        )
+
+        return warped
 
     def __del__(self):
         """Освобождение ресурсов"""
