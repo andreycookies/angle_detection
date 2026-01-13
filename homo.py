@@ -60,87 +60,80 @@ def has_no_ones(array):
     
 
 def create_rect_from_mask_perimeter(mask: np.ndarray, target_ratio = 1):
-
-    # 2. Находим контур и его периметр
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours: return
-    
-    # Берем самый большой контур
-    cnt = max(contours, key=cv2.contourArea)
-    
-    # Считаем периметр (True = замкнутый)
-    perimeter = cv2.arcLength(cnt, True)
-    
-    print(f"Периметр маски: {perimeter:.2f} пикселей")
-    
-    # 3. Вычисляем размеры нового прямоугольника
-    # P = 2 * (w + h)
-    # w = ratio * h
-    # P = 2 * (ratio*h + h) = 2h * (ratio + 1)
-    # h = P / (2 * (ratio + 1))
-    
-    new_h = perimeter / (2 * (target_ratio + 1))
-    new_w = new_h * target_ratio
-    
-    print(f"Новые размеры: {new_w:.2f} x {new_h:.2f} (Ratio: {target_ratio})")
-    
-    # 4. Создаем изображение и рисуем прямоугольник по центру
-    # Размер холста делаем чуть больше фигуры
-    canvas_w = int(new_w*1.5)
-    canvas_h = int(new_h*1.5)
-    result = np.zeros((canvas_h, canvas_w), dtype=np.uint8)
-    
-    # Координаты центра
-    cx, cy = canvas_w // 2, canvas_h // 2
-    
-    # Углы прямоугольника (int округление)
-    w_int, h_int = int(new_w), int(new_h)
-    x1 = cx - w_int // 2
-    y1 = cy - h_int // 2
-    x2 = x1 + w_int
-    y2 = y1 + h_int
-    
-    # Рисуем (залитый белый)
-    return cv2.rectangle(result, (x1, y1), (x2, y2), 255, -1)
+    mask2 = cv2.imread(r'template_masks\mask_w585_h585.png', cv2.IMREAD_GRAYSCALE)
+    return  (mask2[:,:,0] > 0).astype(np.uint8)
 
 
-def detect_sheet_angle_no_homography(warped_mask: np.ndarray) -> float:
-    warped_mask = mask_preprocessing(warped_mask)
+def get_max_radius(mask, cx, cy):
+    y_coords, x_coords = np.where(mask > 0)
+    if len(x_coords) == 0:
+        return 0
+    dists = np.sqrt((x_coords - cx)**2 + (y_coords - cy)**2)
+    return int(np.max(dists))
 
-    template_mask = create_rect_from_mask_perimeter(warped_mask)
 
-    x, y, w_c, h_c = cv2.boundingRect(cv2.findNonZero(warped_mask))
-    warped_mask_cropped = warped_mask[y:y+h_c, x:x+w_c]
 
-    # --- ВСТАВКИ ---
-    x2, y2, w_c2, h_c2 = cv2.boundingRect(cv2.findNonZero(template_mask))
-    template_mask_cropped = template_mask[y2:y2+h_c2, x2:x2+w_c2]
+def normalize_masks(mask1, mask2):
     
-    # 2. Определяем размер общего "холста" (Canvas)
-    # Берем максимум по всем измерениям, чтобы оба куска влезли целиком
-    # Можно взять фиксированный размер, например 512x512, если объекты не гигантские
-    target_size = max(h_c, w_c, h_c2, w_c2) 
-    # Лучше сделать размер четным для FFT
+    
+    # Находим центры масс и площади
+     
+    cv2.imwrite("img/mask01.png", mask1*255)
+    
+    cv2.imwrite("img/mask02.png", mask2*255)
+    m1 = cv2.moments(mask1)
+    m2 = cv2.moments(mask2)
+    
+    c1 = (int(m1['m10'] / m1['m00']), int(m1['m01'] / m1['m00']))
+    c2 = (int(m2['m10'] / m2['m00']), int(m2['m01'] / m2['m00']))
+    
+    area1, area2 = m1['m00'], m2['m00']
+    
+    # Масштабируем меньшую маску
+    scale = np.sqrt(max(area1, area2) / min(area1, area2))
+    if area1 < area2:
+        mask1 = cv2.resize(mask1, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+        m1 = cv2.moments(mask1)
+        c1 = (int(m1['m10'] / m1['m00']), int(m1['m01'] / m1['m00']))
+    else:
+        mask2 = cv2.resize(mask2, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+        m2 = cv2.moments(mask2)
+        c2 = (int(m2['m10'] / m2['m00']), int(m2['m01'] / m2['m00']))
+
+
+    
+    cv2.imwrite("img/mask1.png", mask1*255)
+    
+    cv2.imwrite("img/mask2.png", mask2*255)
+    # Определяем размер выходного изображения
+    h = max(mask1.shape[0], mask2.shape[0]) + max(c1[1], c2[1])
+    w = max(mask1.shape[1], mask2.shape[1]) + max(c1[0], c2[0])
+
+    target_size = max(w, h)
     if target_size % 2 != 0: target_size += 1
+    
+    # Центрируем обе маски
+    canvas1 = np.zeros((target_size, target_size), dtype=np.uint8)
+    canvas2 = np.zeros((target_size, target_size), dtype=np.uint8)
+    
+    y1, x1 = target_size // 2 - c1[1], target_size // 2 - c1[0]
+    y2, x2 = target_size // 2 - c2[1], target_size // 2 - c2[0]
+    
+    canvas1[y1:y1+mask1.shape[0], x1:x1+mask1.shape[1]] = mask1
+    canvas2[y2:y2+mask2.shape[0], x2:x2+mask2.shape[1]] = mask2
+    
+    return canvas1, canvas2
 
-    def pad_to_size(img, size):
-        h, w = img.shape[:2]
-        # Вычисляем отступы для центрирования
-        top = (size - h) // 2
-        bottom = size - h - top
-        left = (size - w) // 2
-        right = size - w - left
-        return cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
-    warped_mask_cropped = pad_to_size(warped_mask_cropped, target_size)
-    cv2.imwrite("warped_mask_cropped.png", warped_mask_cropped)
-    template_mask_cropped = pad_to_size(template_mask_cropped, target_size)
-    cv2.imwrite("template_mask_cropped.png", template_mask_cropped)
+
+
+def calculate_angle(warped_mask: np.ndarray, template_mask: np.ndarray) -> float:
 
     # 3. Создаем новые src и dst, помещая кропы в центр черного квадрата
-    src = np.float32(pad_to_size(warped_mask_cropped, target_size))
-    cv2.imwrite("template_mask_cropped.png", template_mask_cropped)
+    src = np.float32(warped_mask)
+    cv2.imwrite("img/src.png", src*255)
 
-    dst = np.float32(pad_to_size(template_mask_cropped, target_size))
+    dst = np.float32(template_mask)
+    cv2.imwrite("img/dst.png", dst*255)
     # --- КОНЕЦ ВСТАВКИ ---
 
     # 2. Находим центр и переводим в полярные координаты (Log-Polar)
@@ -155,12 +148,13 @@ def detect_sheet_angle_no_homography(warped_mask: np.ndarray) -> float:
 
     # 4. Linear Polar (для чистого вращения)
     # max_radius берем чуть меньше половины, чтобы не цеплять углы
-    max_radius = target_size * 0.80 
+    radius = max(get_max_radius(src, cx_src, cy_src), 
+             get_max_radius(dst, cx_dst, cy_dst))
 
 
     # Флаг WARP_FILL_OUTLIERS заполняет "пустоты" нулями
-    src_polar = cv2.linearPolar(np.float32(src), (cx_src, cy_src), max_radius, cv2.WARP_FILL_OUTLIERS)
-    dst_polar = cv2.linearPolar(np.float32(dst), (cx_dst, cy_dst), max_radius, cv2.WARP_FILL_OUTLIERS)
+    src_polar = cv2.linearPolar(np.float32(src), (cx_src, cy_src), radius, cv2.WARP_FILL_OUTLIERS)
+    dst_polar = cv2.linearPolar(np.float32(dst), (cx_dst, cy_dst), radius, cv2.WARP_FILL_OUTLIERS)
 
     # 3. Фазовая корреляция находит сдвиг
     hann = cv2.createHanningWindow(src_polar.shape[:2][::-1], cv2.CV_32F)
@@ -172,3 +166,22 @@ def detect_sheet_angle_no_homography(warped_mask: np.ndarray) -> float:
     angle = min(np.abs(90-np.abs(angle)), np.abs(angle))
 
     return float(angle)
+
+
+def detect_sheet_angle_no_homography(warped_mask: np.ndarray) -> float:
+
+
+
+    warped_mask = mask_preprocessing(warped_mask)
+
+    template_mask = create_rect_from_mask_perimeter(warped_mask)
+
+    x, y, w_c, h_c = cv2.boundingRect(cv2.findNonZero(warped_mask))
+    warped_mask_cropped = warped_mask[y:y+h_c, x:x+w_c]
+
+    x2, y2, w_c2, h_c2 = cv2.boundingRect(cv2.findNonZero(template_mask))
+    template_mask_cropped = template_mask[y2:y2+h_c2, x2:x2+w_c2]
+
+    norm_warped_mask, norm_template_mask = normalize_masks(warped_mask_cropped, template_mask_cropped)
+
+    return calculate_angle(norm_warped_mask, norm_template_mask)

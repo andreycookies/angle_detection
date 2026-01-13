@@ -47,7 +47,7 @@ class VideoProcessorApp:
         else:
             print("⚠️  CUDA not available, using CPU")
         
-        json_path = r".\frames_homo.json"
+        json_path = r".\video_homo.json"
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
             H = np.array(data["homography_matrix"], dtype=np.float64)
@@ -414,10 +414,10 @@ class VideoProcessorApp:
         try:
             # ИСХОДНЫЙ КАДР
             image = frame.copy()
-            cv2.imwrite("image.png", image)
+            #cv2.imwrite("img/image.png", image)
 
             warped_image = self.warp_with_homography_keep_size(image, self.H)
-            cv2.imwrite("warped_image.png", warped_image)
+            cv2.imwrite("img/warped_image.png", warped_image)
 
             with torch.no_grad(), torch.amp.autocast("cuda"):
                 results = self.handled_model(
@@ -438,12 +438,12 @@ class VideoProcessorApp:
             # ИСХОДНАЯ МАСКА
             mask = masks[0]
             binary_mask = (mask > 0).astype(np.uint8)
-            cv2.imwrite("mask.png", binary_mask * 255)
+            cv2.imwrite("img/mask.png", binary_mask * 255)
 
 
             # ОБРАБОТАННАЯ МАСКА
             m = mask_preprocessing(binary_mask)
-            cv2.imwrite("processed_mask.png", m * 255)
+            #cv2.imwrite("img/processed_mask.png", m * 255)
 
             if has_no_ones(m):
                 return image
@@ -451,7 +451,7 @@ class VideoProcessorApp:
             # ИЗМЕНЕННАЯ МАСКА
             h, w = image.shape[:2]
             resized_mask = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
-            cv2.imwrite("resized_mask.png", resized_mask*255)
+            cv2.imwrite("img/resized_mask.png", resized_mask*255)
 
             approx4, _ = find_4_points(resized_mask)
             angle = detect_sheet_angle_no_homography(resized_mask)
@@ -478,7 +478,7 @@ class VideoProcessorApp:
                 cv2.rectangle(image, (x1, y1), (x2, y2), (0, 0, 255), 5)
 
             # BOXED КАДР
-            cv2.imwrite("boxed_image.png", image)
+            #cv2.imwrite("img/boxed_image.png", image)
             return image
 
         except Exception as e:

@@ -31,7 +31,7 @@ def profile_detailed():
     test_image = np.random.randint(0, 255, (1080, 1920, 3), dtype=np.uint8)
     
     # Загружаем homography данные
-    with open("../frames_homo.json", "r") as f:
+    with open("../video_homo.json", "r") as f:
         data = json.load(f)
     
     K = np.array(data["camera_matrix"], dtype=np.float64)
