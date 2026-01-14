@@ -51,6 +51,13 @@ def get_max_radius(mask, cx, cy):
 
 def normalize_masks(mask1, mask2):
     # Находим центры масс и площади
+
+    x_1, y_1, w_c_1, h_c_1 = cv2.boundingRect(cv2.findNonZero(mask1))
+    mask1 = mask1[y_1:y_1+h_c_1, x_1:x_1+w_c_1]
+
+    x_2, y_2, w_c_2, h_c_2 = cv2.boundingRect(cv2.findNonZero(mask2))
+    mask2 = mask2[y_2:y_2+h_c_2, x_2:x_2+w_c_2]
+
     m1 = cv2.moments(mask1)
     m2 = cv2.moments(mask2)
     
@@ -73,8 +80,9 @@ def normalize_masks(mask1, mask2):
     
     radius = max(get_max_radius(mask1, c1[0], c1[1]), 
              get_max_radius(mask2, c2[0], c2[1]))
+    max_side = max(mask1.shape[0], mask2.shape[0], mask2.shape[0], mask2.shape[1])
+    target_size = max(int(np.ceil(np.hypot(max_side, max_side))), 2*radius) 
     
-    target_size = max(mask1.shape[0], mask1.shape[1], mask2.shape[0], mask2.shape[1], 3*radius) 
     if target_size % 2 != 0: target_size += 51 
     else: target_size += 52
     
@@ -119,7 +127,9 @@ def iou(a, b):
     return (inter_count / union_count) if union_count > 0 else 0.0
 
 def precompute_rotations(mask: np.ndarray, angles=range(-30, 31)):
-    # Вычисляем центр один раз
+    mask = (mask > 0).astype(np.uint8)
+
+    # === ТВОЙ КОД: центр через moments (НЕ ТРОГАЕМ) ===
     m = cv2.moments(mask)
     if m['m00'] == 0:
         cx = mask.shape[1] // 2
@@ -128,13 +138,34 @@ def precompute_rotations(mask: np.ndarray, angles=range(-30, 31)):
         cx = int(m['m10'] / m['m00'])
         cy = int(m['m01'] / m['m00'])
 
+    h, w = mask.shape[:2]
+
+    # === ДОБАВЛЯЕМ PADDING (МИНИМАЛЬНО) ===
+    base = max(h, w)
+    target_size = int(np.ceil(np.hypot(base, base)))
+    if target_size % 2 != 0:  target_size += 51
+    else:  target_size += 52
+
+    canvas = np.zeros((target_size, target_size), dtype=np.uint8)
+
+    # сдвиг, чтобы центр маски (cx,cy) оказался в центре canvas
+    y0 = target_size // 2 - cy
+    x0 = target_size // 2 - cx
+
+    canvas[y0:y0+h, x0:x0+w] = mask
+
+    # новый центр — тот же самый объектный центр, но уже в canvas
+    cx_p = target_size // 2
+    cy_p = target_size // 2
+
     rotations = {}
     for angle in angles:
-        M = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
-        rotated = cv2.warpAffine(mask, M, (mask.shape[1], mask.shape[0]), flags=cv2.INTER_NEAREST)
+        M = cv2.getRotationMatrix2D((cx_p, cy_p), angle, 1.0)
+        rotated = cv2.warpAffine( canvas,  M,  (target_size, target_size),  flags=cv2.INTER_NEAREST, borderValue=0 )
         rotations[angle] = rotated
-    return rotations
 
+    return rotations
+    
 def crop_to_union(a: np.ndarray, b: np.ndarray):
     # a и b — бинарные uint8 маски (0/255 или 0/1)
     # приводим к 0/255 для findNonZero
@@ -218,6 +249,14 @@ def find_template(mask: np.ndarray):
     best_template_mask = None
     best_angle = None
     best_score = -1
+
+    x, y, w_c, h_c = cv2.boundingRect(cv2.findNonZero(mask))
+    mask = mask[y:y+h_c, x:x+w_c]
+
+    rotations = precompute_rotations(mask, angles=range(-30, 31))
+
+    #cv2.imwrite("img/rotations_30.png", rotations[30]*255)
+
     for p in Path("template_masks").glob("*.*"):
         if p.suffix.lower() not in (".png",".jpg",".jpeg",".tif",".tiff",".bmp"): continue
         img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
@@ -228,19 +267,29 @@ def find_template(mask: np.ndarray):
         x2, y2, w_c2, h_c2 = cv2.boundingRect(cv2.findNonZero(template_mask))
         template_mask = template_mask[y2:y2+h_c2, x2:x2+w_c2]
 
-        mask, template_mask = normalize_masks(mask, template_mask)
+        max_dim = max(512, max(mask.shape))
+        scale = max(1.0, max(template_mask.shape) / max_dim)
+        if scale > 1.0:
+            template_mask = cv2.resize(template_mask, (int(template_mask.shape[1]/scale), int(template_mask.shape[0]/scale)), interpolation=cv2.INTER_NEAREST)
 
+        mask, template_mask = normalize_masks(mask, template_mask)
         for flip in (None, 0, 1, -1):  # orig, vert, horiz, both
             template_mask = template_mask if flip is None else cv2.flip(template_mask, flip)
             for template_angle in (0, 90):
                 template_mask = rotation(template_mask, template_angle)
-                angle, score = calculate_angle_iou(mask, template_mask)    
-                if score > best_score:
-                    best_score = score
-                    best_angle = angle
-                    best_template_mask = template_mask
-    print(best_angle)
-    cv2.imwrite("img/best_template_mask.png", best_template_mask*255)
+                for angle, rotated in rotations.items():   
+                    rotated, template_mask = normalize_masks(rotated, template_mask)
+                    a_crop, b_crop = crop_to_union(rotated, template_mask)
+                    score = iou(a_crop, b_crop) 
+                    if score > best_score:
+                        best_score = score
+                        best_angle = angle
+                        best_template_mask = template_mask
+                        print(best_score, angle)  
+                        cv2.imwrite("img/best_template_mask.png", best_template_mask*255)
+                        cv2.imwrite("img/rotated.png", rotated*255)
+
+    
     return float(best_angle), best_template_mask
 
 
@@ -249,11 +298,7 @@ def detect_sheet_angle_no_homography(warped_mask: np.ndarray) -> float:
 
 
 
-    x, y, w_c, h_c = cv2.boundingRect(cv2.findNonZero(warped_mask))
-    warped_mask_cropped = warped_mask[y:y+h_c, x:x+w_c]
-
-
-    angle, template_mask = find_template(warped_mask_cropped)
+    angle, template_mask = find_template(warped_mask)
 
     #norm_warped_mask, norm_template_mask = normalize_masks(warped_mask_cropped, template_mask_cropped)
     
