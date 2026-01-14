@@ -41,11 +41,11 @@ def has_no_ones(array):
 
 
 def get_max_radius(mask, cx, cy):
-    y_coords, x_coords = np.where(mask > 0)
-    if len(x_coords) == 0:
+    y_coords, x_coords = np.nonzero(mask)  # быстрее, возвращает int arrays
+    if x_coords.size == 0:
         return 0
-    dists = np.sqrt((x_coords - cx)**2 + (y_coords - cy)**2)
-    return int(np.max(dists))
+    d2 = (x_coords - cx).astype(np.int64)**2 + (y_coords - cy).astype(np.int64)**2
+    return int(np.sqrt(d2.max()))
 
 
 
@@ -94,6 +94,58 @@ def normalize_masks(mask1, mask2):
     
     return canvas1, canvas2
 
+def rotation(mask: np.ndarray, angle):
+    m = cv2.moments(mask)
+    rotated = cv2.warpAffine(mask, cv2.getRotationMatrix2D((int(m['m10']/m['m00']), int(m['m01']/m['m00'])), angle, 1.0), (mask.shape[1], mask.shape[0]))
+    return rotated
+
+def iou(a, b):
+    # Ожидаем uint8 бинарные маски {0,1} или {0,255}
+    if a.dtype != np.uint8:
+        a = (a > 0).astype(np.uint8)
+    if b.dtype != np.uint8:
+        b = (b > 0).astype(np.uint8)
+
+    # Привести к 0/255 (cv2.bitwise_and работает быстрее для uint8)
+    if a.max() == 1:
+        a = a * 255
+    if b.max() == 1:
+        b = b * 255
+
+    inter = cv2.bitwise_and(a, b)
+    union = cv2.bitwise_or(a, b)
+    inter_count = cv2.countNonZero(inter)
+    union_count = cv2.countNonZero(union)
+    return (inter_count / union_count) if union_count > 0 else 0.0
+
+def precompute_rotations(mask: np.ndarray, angles=range(-30, 31)):
+    # Вычисляем центр один раз
+    m = cv2.moments(mask)
+    if m['m00'] == 0:
+        cx = mask.shape[1] // 2
+        cy = mask.shape[0] // 2
+    else:
+        cx = int(m['m10'] / m['m00'])
+        cy = int(m['m01'] / m['m00'])
+
+    rotations = {}
+    for angle in angles:
+        M = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
+        rotated = cv2.warpAffine(mask, M, (mask.shape[1], mask.shape[0]), flags=cv2.INTER_NEAREST)
+        rotations[angle] = rotated
+    return rotations
+
+def crop_to_union(a: np.ndarray, b: np.ndarray):
+    # a и b — бинарные uint8 маски (0/255 или 0/1)
+    # приводим к 0/255 для findNonZero
+    aa = (a > 0).astype(np.uint8) * 255
+    bb = (b > 0).astype(np.uint8) * 255
+    nonz = cv2.bitwise_or(aa, bb)
+    pts = cv2.findNonZero(nonz)
+    if pts is None:
+        return aa, bb  # обе пустые
+    x, y, w, h = cv2.boundingRect(pts)
+    return aa[y:y+h, x:x+w], bb[y:y+h, x:x+w]
 
 
 def calculate_angle_line_polar(warped_mask: np.ndarray, template_mask: np.ndarray) -> float:
@@ -150,6 +202,16 @@ def calculate_angle_iou(warped_mask: np.ndarray, template_mask: np.ndarray) -> f
             best_angle = angle
     return float(best_angle), best_score
 
+def calculate_angle_iou_precomputed_iou(rotated_masks: dict, template_mask: np.ndarray):
+    best_angle = None
+    best_score = -1
+    for angle, rotated in rotated_masks.items():
+        score = iou(rotated, template_mask)
+        if score > best_score:
+            best_score = score
+            best_angle = angle
+    return float(best_angle), best_score
+
 
 def find_template(mask: np.ndarray):  
 
@@ -181,29 +243,7 @@ def find_template(mask: np.ndarray):
     cv2.imwrite("img/best_template_mask.png", best_template_mask*255)
     return float(best_angle), best_template_mask
 
-def rotation(mask: np.ndarray, angle):
-    m = cv2.moments(mask)
-    rotated = cv2.warpAffine(mask, cv2.getRotationMatrix2D((int(m['m10']/m['m00']), int(m['m01']/m['m00'])), angle, 1.0), (mask.shape[1], mask.shape[0]))
-    return rotated
 
-def iou(a, b):
-    # Ожидаем uint8 бинарные маски {0,1} или {0,255}
-    if a.dtype != np.uint8:
-        a = (a > 0).astype(np.uint8)
-    if b.dtype != np.uint8:
-        b = (b > 0).astype(np.uint8)
-
-    # Привести к 0/255 (cv2.bitwise_and работает быстрее для uint8)
-    if a.max() == 1:
-        a = a * 255
-    if b.max() == 1:
-        b = b * 255
-
-    inter = cv2.bitwise_and(a, b)
-    union = cv2.bitwise_or(a, b)
-    inter_count = cv2.countNonZero(inter)
-    union_count = cv2.countNonZero(union)
-    return (inter_count / union_count) if union_count > 0 else 0.0
 
 def detect_sheet_angle_no_homography(warped_mask: np.ndarray) -> float:
 
