@@ -12,7 +12,7 @@ import time
 from ultralytics import YOLO
 import numpy as np
 import math
-from homo import mask_preprocessing, has_no_ones, find_4_points, detect_sheet_angle_no_homography
+from homo import mask_preprocessing, has_no_ones, detect_sheet_angle_no_homography
 
 
 class VideoProcessorApp:
@@ -452,7 +452,7 @@ class VideoProcessorApp:
             h, w = image.shape[:2]
             resized_mask = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
 
-            approx4, _ = find_4_points(resized_mask)
+            
             angle = detect_sheet_angle_no_homography(resized_mask)
 
             self.update_statistics(angle, self.display_fps_5s)

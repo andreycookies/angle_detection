@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from pathlib import Path
 
 
 def mask_preprocessing(mask: np.ndarray):
@@ -23,33 +24,6 @@ def mask_preprocessing(mask: np.ndarray):
     return m
 
 
-def order_pts(pts):
-    """Упорядочивает точки квадрата в формат tl tr br bl"""
-    pts = pts.astype(np.float32)
-    s = pts.sum(axis=1)
-    diff = np.diff(pts, axis=1).ravel()
-    tl = pts[np.argmin(s)]
-    br = pts[np.argmax(s)]
-    tr = pts[np.argmin(diff)]
-    bl = pts[np.argmax(diff)]
-    return np.array([tl, tr, br, bl], dtype=np.float32)
-
-
-def find_4_points(mask: np.ndarray):
-    """Апроксимирует контур к четырехугольнику, возвращает координаты точек"""
-    m = mask.copy()
-    cnts = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cnts = cnts[0] if len(cnts) == 2 else cnts[1]
-    if not cnts:
-        return float("nan")
-    c = max(cnts, key=cv2.contourArea)
-    if cv2.contourArea(c) < 100:  # слишком маленькая область
-        return float("nan")
-
-    peri = cv2.arcLength(c, True)
-    approx = cv2.approxPolyDP(c, 0.001 * peri, True)
-    approx4 = order_pts(approx.reshape(len(approx), 2)).reshape(4, 1, 2)
-    return approx4, peri
 
 
 def has_no_ones(array):
@@ -100,12 +74,17 @@ def normalize_masks(mask1, mask2):
     radius = max(get_max_radius(mask1, c1[0], c1[1]), 
              get_max_radius(mask2, c2[0], c2[1]))
     
-    target_size = max(mask1.shape[0], mask1.shape[1], mask2.shape[0], mask2.shape[1], 2*radius) 
-    if target_size % 2 != 0: target_size += 1
+    target_size = max(mask1.shape[0], mask1.shape[1], mask2.shape[0], mask2.shape[1], 3*radius) 
+    if target_size % 2 != 0: target_size += 51 
+    else: target_size += 52
     
     # Центрируем обе маски
     canvas1 = np.zeros((target_size, target_size), dtype=np.uint8)
     canvas2 = np.zeros((target_size, target_size), dtype=np.uint8)
+
+    #print(canvas1.shape, mask1.shape,mask2.shape )
+    #cv2.imwrite("img/mask1.png", mask1*255)
+    #cv2.imwrite("img/mask2.png", mask2*255)
     
     y1, x1 = target_size // 2 - c1[1], target_size // 2 - c1[0]
     y2, x2 = target_size // 2 - c2[1], target_size // 2 - c2[0]
@@ -117,7 +96,7 @@ def normalize_masks(mask1, mask2):
 
 
 
-def calculate_angle(warped_mask: np.ndarray, template_mask: np.ndarray) -> float:
+def calculate_angle_line_polar(warped_mask: np.ndarray, template_mask: np.ndarray) -> float:
 
     # 3. Создаем новые src и dst, помещая кропы в центр черного квадрата
     src = np.float32(warped_mask)
@@ -159,29 +138,84 @@ def calculate_angle(warped_mask: np.ndarray, template_mask: np.ndarray) -> float
 
     return float(angle)
 
+def calculate_angle_iou(warped_mask: np.ndarray, template_mask: np.ndarray) -> float:
+    best_angle = None
+    best_score = -1
 
-def find_template(mask: np.ndarray, target_ratio = 1):
-    mask2 = cv2.imread(r'template_masks\mask_w820_h957.png', cv2.IMREAD_GRAYSCALE)
-    return  (mask2[:,:,0] > 0).astype(np.uint8)
+    for angle in range(-30, 31):
+        rotated = rotation(warped_mask, angle)
+        score = iou(rotated, template_mask)
+        if score > best_score:
+            best_score = score
+            best_angle = angle
+    return float(best_angle), best_score
+
+
+def find_template(mask: np.ndarray):  
+
+    best_template_mask = None
+    best_angle = None
+    best_score = -1
+    for p in Path("template_masks").glob("*.*"):
+        if p.suffix.lower() not in (".png",".jpg",".jpeg",".tif",".tiff",".bmp"): continue
+        img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+        if img is None: continue
+        template_mask = (img[:,:,0] > 0).astype(np.uint8)         # булева маска
+
+        
+        x2, y2, w_c2, h_c2 = cv2.boundingRect(cv2.findNonZero(template_mask))
+        template_mask = template_mask[y2:y2+h_c2, x2:x2+w_c2]
+
+        mask, template_mask = normalize_masks(mask, template_mask)
+
+        for flip in (None, 0, 1, -1):  # orig, vert, horiz, both
+            template_mask = template_mask if flip is None else cv2.flip(template_mask, flip)
+            for template_angle in (0, 90):
+                template_mask = rotation(template_mask, template_angle)
+                angle, score = calculate_angle_iou(mask, template_mask)    
+                if score > best_score:
+                    best_score = score
+                    best_angle = angle
+                    best_template_mask = template_mask
+    print(best_angle)
+    cv2.imwrite("img/best_template_mask.png", best_template_mask*255)
+    return float(best_angle), best_template_mask
 
 def rotation(mask: np.ndarray, angle):
     m = cv2.moments(mask)
     rotated = cv2.warpAffine(mask, cv2.getRotationMatrix2D((int(m['m10']/m['m00']), int(m['m01']/m['m00'])), angle, 1.0), (mask.shape[1], mask.shape[0]))
     return rotated
 
+def iou(a, b):
+    # Ожидаем uint8 бинарные маски {0,1} или {0,255}
+    if a.dtype != np.uint8:
+        a = (a > 0).astype(np.uint8)
+    if b.dtype != np.uint8:
+        b = (b > 0).astype(np.uint8)
+
+    # Привести к 0/255 (cv2.bitwise_and работает быстрее для uint8)
+    if a.max() == 1:
+        a = a * 255
+    if b.max() == 1:
+        b = b * 255
+
+    inter = cv2.bitwise_and(a, b)
+    union = cv2.bitwise_or(a, b)
+    inter_count = cv2.countNonZero(inter)
+    union_count = cv2.countNonZero(union)
+    return (inter_count / union_count) if union_count > 0 else 0.0
+
 def detect_sheet_angle_no_homography(warped_mask: np.ndarray) -> float:
 
-    template_mask = find_template(warped_mask)
+
 
     x, y, w_c, h_c = cv2.boundingRect(cv2.findNonZero(warped_mask))
     warped_mask_cropped = warped_mask[y:y+h_c, x:x+w_c]
 
-    x2, y2, w_c2, h_c2 = cv2.boundingRect(cv2.findNonZero(template_mask))
-    template_mask_cropped = template_mask[y2:y2+h_c2, x2:x2+w_c2]
 
+    angle, template_mask = find_template(warped_mask_cropped)
 
-    
-    norm_warped_mask, norm_template_mask = normalize_masks(warped_mask_cropped, template_mask_cropped)
+    #norm_warped_mask, norm_template_mask = normalize_masks(warped_mask_cropped, template_mask_cropped)
     
     #norm_warped_mask = rotation(norm_warped_mask, 20)
     
@@ -189,4 +223,6 @@ def detect_sheet_angle_no_homography(warped_mask: np.ndarray) -> float:
     #norm_warped_mask = mask_preprocessing(norm_warped_mask)
     #norm_warped_mask, norm_template_mask = normalize_masks(norm_warped_mask, norm_template_mask)
 
-    return calculate_angle(norm_warped_mask, norm_template_mask)
+    #calculate_angle_line_polar(norm_warped_mask, norm_template_mask)
+
+    return angle
