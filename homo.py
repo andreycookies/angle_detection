@@ -106,8 +106,6 @@ def normalize_masks(mask1, mask2):
     # Центрируем обе маски
     canvas1 = np.zeros((target_size, target_size), dtype=np.uint8)
     canvas2 = np.zeros((target_size, target_size), dtype=np.uint8)
-
-    print(canvas1.shape, mask1.shape)
     
     y1, x1 = target_size // 2 - c1[1], target_size // 2 - c1[0]
     y2, x2 = target_size // 2 - c2[1], target_size // 2 - c2[0]
@@ -156,7 +154,8 @@ def calculate_angle(warped_mask: np.ndarray, template_mask: np.ndarray) -> float
     # 6. Расчет угла
     dy = shift[1]
     angle = -(dy * 360.0) / src_polar.shape[0] # shape[0] это высота (h)
-    angle = min(np.abs(90-np.abs(angle)), np.abs(angle))
+    #angle = min(np.abs(90-np.abs(angle)), np.abs(angle))
+    angle = np.abs(angle)
 
     return float(angle)
 
@@ -165,6 +164,10 @@ def find_template(mask: np.ndarray, target_ratio = 1):
     mask2 = cv2.imread(r'template_masks\mask_w820_h957.png', cv2.IMREAD_GRAYSCALE)
     return  (mask2[:,:,0] > 0).astype(np.uint8)
 
+def rotation(mask: np.ndarray, angle):
+    m = cv2.moments(mask)
+    rotated = cv2.warpAffine(mask, cv2.getRotationMatrix2D((int(m['m10']/m['m00']), int(m['m01']/m['m00'])), angle, 1.0), (mask.shape[1], mask.shape[0]))
+    return rotated
 
 def detect_sheet_angle_no_homography(warped_mask: np.ndarray) -> float:
 
@@ -176,7 +179,13 @@ def detect_sheet_angle_no_homography(warped_mask: np.ndarray) -> float:
     x2, y2, w_c2, h_c2 = cv2.boundingRect(cv2.findNonZero(template_mask))
     template_mask_cropped = template_mask[y2:y2+h_c2, x2:x2+w_c2]
 
+
+    
     norm_warped_mask, norm_template_mask = normalize_masks(warped_mask_cropped, template_mask_cropped)
+    
+    #norm_warped_mask = rotation(norm_warped_mask, 20)
+    
+    #cv2.imwrite("img/norm_warped_mask_rot.png", norm_warped_mask*255)
     #norm_warped_mask = mask_preprocessing(norm_warped_mask)
     #norm_warped_mask, norm_template_mask = normalize_masks(norm_warped_mask, norm_template_mask)
 

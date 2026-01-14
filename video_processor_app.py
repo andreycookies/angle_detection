@@ -451,7 +451,6 @@ class VideoProcessorApp:
             # ИЗМЕНЕННАЯ МАСКА
             h, w = image.shape[:2]
             resized_mask = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
-            cv2.imwrite("img/resized_mask.png", resized_mask*255)
 
             approx4, _ = find_4_points(resized_mask)
             angle = detect_sheet_angle_no_homography(resized_mask)
