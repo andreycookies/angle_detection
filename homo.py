@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from pathlib import Path
 
 
 def mask_preprocessing(mask: np.ndarray) -> np.ndarray:
@@ -76,88 +77,154 @@ def has_no_ones(array):
         return not np.any(arr == 1)
     
 
-def create_rect_from_mask_perimeter(mask: np.ndarray, target_ratio = 1):
 
-    # 2. Находим контур и его периметр
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours: return
-    
-    # Берем самый большой контур
-    cnt = max(contours, key=cv2.contourArea)
-    
-    # Считаем периметр (True = замкнутый)
-    perimeter = cv2.arcLength(cnt, True)
-    
-    print(f"Периметр маски: {perimeter:.2f} пикселей")
-    
-    # 3. Вычисляем размеры нового прямоугольника
-    # P = 2 * (w + h)
-    # w = ratio * h
-    # P = 2 * (ratio*h + h) = 2h * (ratio + 1)
-    # h = P / (2 * (ratio + 1))
-    
-    new_h = perimeter / (2 * (target_ratio + 1))
-    new_w = new_h * target_ratio
-    
-    print(f"Новые размеры: {new_w:.2f} x {new_h:.2f} (Ratio: {target_ratio})")
-    
-    # 4. Создаем изображение и рисуем прямоугольник по центру
-    # Размер холста делаем чуть больше фигуры
-    canvas_w = int(new_w*1.5)
-    canvas_h = int(new_h*1.5)
-    result = np.zeros((canvas_h, canvas_w), dtype=np.uint8)
-    
-    # Координаты центра
-    cx, cy = canvas_w // 2, canvas_h // 2
-    
-    # Углы прямоугольника (int округление)
-    w_int, h_int = int(new_w), int(new_h)
-    x1 = cx - w_int // 2
-    y1 = cy - h_int // 2
-    x2 = x1 + w_int
-    y2 = y1 + h_int
-    
-    # Рисуем (залитый белый)
-    return cv2.rectangle(result, (x1, y1), (x2, y2), 255, -1)
+def get_max_radius(mask, cx, cy):
+    y_coords, x_coords = np.nonzero(mask)  # быстрее, возвращает int arrays
+    if x_coords.size == 0:
+        return 0
+    d2 = (x_coords - cx).astype(np.int64)**2 + (y_coords - cy).astype(np.int64)**2
+    return int(np.sqrt(d2.max()))
 
 
-def detect_sheet_angle_no_homography(warped_mask: np.ndarray) -> float:
-    warped_mask = mask_preprocessing(warped_mask)
 
-    template_mask = create_rect_from_mask_perimeter(warped_mask)
+def normalize_masks(mask1, mask2):
+    # Находим центры масс и площади
 
-    x, y, w_c, h_c = cv2.boundingRect(cv2.findNonZero(warped_mask))
-    warped_mask_cropped = warped_mask[y:y+h_c, x:x+w_c]
+    x_1, y_1, w_c_1, h_c_1 = cv2.boundingRect(cv2.findNonZero(mask1))
+    mask1 = mask1[y_1:y_1+h_c_1, x_1:x_1+w_c_1]
 
-    # --- ВСТАВКИ ---
-    x2, y2, w_c2, h_c2 = cv2.boundingRect(cv2.findNonZero(template_mask))
-    template_mask_cropped = template_mask[y2:y2+h_c2, x2:x2+w_c2]
+    x_2, y_2, w_c_2, h_c_2 = cv2.boundingRect(cv2.findNonZero(mask2))
+    mask2 = mask2[y_2:y_2+h_c_2, x_2:x_2+w_c_2]
+
+    m1 = cv2.moments(mask1)
+    m2 = cv2.moments(mask2)
     
-    # 2. Определяем размер общего "холста" (Canvas)
-    # Берем максимум по всем измерениям, чтобы оба куска влезли целиком
-    # Можно взять фиксированный размер, например 512x512, если объекты не гигантские
-    target_size = max(h_c, w_c, h_c2, w_c2) 
-    # Лучше сделать размер четным для FFT
-    if target_size % 2 != 0: target_size += 1
+    c1 = (int(m1['m10'] / m1['m00']), int(m1['m01'] / m1['m00']))
+    c2 = (int(m2['m10'] / m2['m00']), int(m2['m01'] / m2['m00']))
+    
+    area1, area2 = m1['m00'], m2['m00']
 
-    def pad_to_size(img, size):
-        h, w = img.shape[:2]
-        # Вычисляем отступы для центрирования
-        top = (size - h) // 2
-        bottom = size - h - top
-        left = (size - w) // 2
-        right = size - w - left
-        return cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
-    warped_mask_cropped = pad_to_size(warped_mask_cropped, target_size)
-    cv2.imwrite("warped_mask_cropped.png", warped_mask_cropped * 255)
-    template_mask_cropped = pad_to_size(template_mask_cropped, target_size)
-    cv2.imwrite("template_mask_cropped.png", template_mask_cropped * 255)
+    # Масштабируем меньшую маску
+    scale = np.sqrt(max(area1, area2) / min(area1, area2))
+    if area1 < area2:
+        mask1 = cv2.resize(mask1, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+        m1 = cv2.moments(mask1)
+        c1 = (int(m1['m10'] / m1['m00']), int(m1['m01'] / m1['m00']))
+    else:
+        mask2 = cv2.resize(mask2, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+        m2 = cv2.moments(mask2)
+        c2 = (int(m2['m10'] / m2['m00']), int(m2['m01'] / m2['m00']))
+    # Определяем размер выходного изображения
+
+    radius = max(get_max_radius(mask1, c1[0], c1[1]),
+             get_max_radius(mask2, c2[0], c2[1]))
+    max_side = max(mask1.shape[0], mask2.shape[0], mask2.shape[0], mask2.shape[1])
+    target_size = max(int(np.ceil(np.hypot(max_side, max_side))), 2*radius)
+
+    if target_size % 2 != 0: target_size += 51
+    else: target_size += 52
+
+    # Центрируем обе маски
+    canvas1 = np.zeros((target_size, target_size), dtype=np.uint8)
+    canvas2 = np.zeros((target_size, target_size), dtype=np.uint8)
+
+    #print(canvas1.shape, mask1.shape,mask2.shape )
+    #cv2.imwrite("img/mask1.png", mask1*255)
+    #cv2.imwrite("img/mask2.png", mask2*255)
+    
+    y1, x1 = target_size // 2 - c1[1], target_size // 2 - c1[0]
+    y2, x2 = target_size // 2 - c2[1], target_size // 2 - c2[0]
+
+    canvas1[y1:y1+mask1.shape[0], x1:x1+mask1.shape[1]] = mask1
+    canvas2[y2:y2+mask2.shape[0], x2:x2+mask2.shape[1]] = mask2
+
+    return canvas1, canvas2
+
+def rotation(mask: np.ndarray, angle):
+    m = cv2.moments(mask)
+    rotated = cv2.warpAffine(mask, cv2.getRotationMatrix2D((int(m['m10']/m['m00']), int(m['m01']/m['m00'])), angle, 1.0), (mask.shape[1], mask.shape[0]))
+    return rotated
+
+def iou(a, b):
+    # Ожидаем uint8 бинарные маски {0,1} или {0,255}
+    if a.dtype != np.uint8:
+        a = (a > 0).astype(np.uint8)
+    if b.dtype != np.uint8:
+        b = (b > 0).astype(np.uint8)
+
+    # Привести к 0/255 (cv2.bitwise_and работает быстрее для uint8)
+    if a.max() == 1:
+        a = a * 255
+    if b.max() == 1:
+        b = b * 255
+
+    inter = cv2.bitwise_and(a, b)
+    union = cv2.bitwise_or(a, b)
+    inter_count = cv2.countNonZero(inter)
+    union_count = cv2.countNonZero(union)
+    return (inter_count / union_count) if union_count > 0 else 0.0
+
+def precompute_rotations(mask: np.ndarray, angles=range(-30, 31)):
+    mask = (mask > 0).astype(np.uint8)
+
+    # === ТВОЙ КОД: центр через moments (НЕ ТРОГАЕМ) ===
+    m = cv2.moments(mask)
+    if m['m00'] == 0:
+        cx = mask.shape[1] // 2
+        cy = mask.shape[0] // 2
+    else:
+        cx = int(m['m10'] / m['m00'])
+        cy = int(m['m01'] / m['m00'])
+
+    h, w = mask.shape[:2]
+
+    # === ДОБАВЛЯЕМ PADDING (МИНИМАЛЬНО) ===
+    base = max(h, w)
+    target_size = int(np.ceil(np.hypot(base, base)))
+    if target_size % 2 != 0:  target_size += 51
+    else:  target_size += 52
+
+    canvas = np.zeros((target_size, target_size), dtype=np.uint8)
+
+    # сдвиг, чтобы центр маски (cx,cy) оказался в центре canvas
+    y0 = target_size // 2 - cy
+    x0 = target_size // 2 - cx
+
+    canvas[y0:y0+h, x0:x0+w] = mask
+
+    # новый центр — тот же самый объектный центр, но уже в canvas
+    cx_p = target_size // 2
+    cy_p = target_size // 2
+
+    rotations = {}
+    for angle in angles:
+        M = cv2.getRotationMatrix2D((cx_p, cy_p), angle, 1.0)
+        rotated = cv2.warpAffine( canvas,  M,  (target_size, target_size),  flags=cv2.INTER_NEAREST, borderValue=0 )
+        rotations[angle] = rotated
+
+    return rotations
+
+def crop_to_union(a: np.ndarray, b: np.ndarray):
+    # a и b — бинарные uint8 маски (0/255 или 0/1)
+    # приводим к 0/255 для findNonZero
+    aa = (a > 0).astype(np.uint8) * 255
+    bb = (b > 0).astype(np.uint8) * 255
+    nonz = cv2.bitwise_or(aa, bb)
+    pts = cv2.findNonZero(nonz)
+    if pts is None:
+        return aa, bb  # обе пустые
+    x, y, w, h = cv2.boundingRect(pts)
+    return aa[y:y+h, x:x+w], bb[y:y+h, x:x+w]
+
+
+def calculate_angle_line_polar(warped_mask: np.ndarray, template_mask: np.ndarray) -> float:
 
     # 3. Создаем новые src и dst, помещая кропы в центр черного квадрата
-    src = np.float32(pad_to_size(warped_mask_cropped, target_size))
-    cv2.imwrite("template_mask_cropped.png", template_mask_cropped)
+    src = np.float32(warped_mask)
+    cv2.imwrite("img/src.png", src*255)
 
-    dst = np.float32(pad_to_size(template_mask_cropped, target_size))
+    dst = np.float32(template_mask)
+    cv2.imwrite("img/dst.png", dst*255)
     # --- КОНЕЦ ВСТАВКИ ---
 
     # 2. Находим центр и переводим в полярные координаты (Log-Polar)
@@ -172,12 +239,13 @@ def detect_sheet_angle_no_homography(warped_mask: np.ndarray) -> float:
 
     # 4. Linear Polar (для чистого вращения)
     # max_radius берем чуть меньше половины, чтобы не цеплять углы
-    max_radius = target_size * 0.80 
+    radius = max(get_max_radius(src, cx_src, cy_src),
+             get_max_radius(dst, cx_dst, cy_dst))
 
 
     # Флаг WARP_FILL_OUTLIERS заполняет "пустоты" нулями
-    src_polar = cv2.linearPolar(np.float32(src), (cx_src, cy_src), max_radius, cv2.WARP_FILL_OUTLIERS)
-    dst_polar = cv2.linearPolar(np.float32(dst), (cx_dst, cy_dst), max_radius, cv2.WARP_FILL_OUTLIERS)
+    src_polar = cv2.linearPolar(np.float32(src), (cx_src, cy_src), radius, cv2.WARP_FILL_OUTLIERS)
+    dst_polar = cv2.linearPolar(np.float32(dst), (cx_dst, cy_dst), radius, cv2.WARP_FILL_OUTLIERS)
 
     # 3. Фазовая корреляция находит сдвиг
     hann = cv2.createHanningWindow(src_polar.shape[:2][::-1], cv2.CV_32F)
@@ -186,6 +254,98 @@ def detect_sheet_angle_no_homography(warped_mask: np.ndarray) -> float:
     # 6. Расчет угла
     dy = shift[1]
     angle = -(dy * 360.0) / src_polar.shape[0] # shape[0] это высота (h)
-    angle = min(np.abs(90-np.abs(angle)), np.abs(angle))
+    #angle = min(np.abs(90-np.abs(angle)), np.abs(angle))
+    angle = np.abs(angle)
 
     return float(angle)
+
+def calculate_angle_iou(warped_mask: np.ndarray, template_mask: np.ndarray) -> float:
+    best_angle = None
+    best_score = -1
+
+    for angle in range(-30, 31):
+        rotated = rotation(warped_mask, angle)
+        score = iou(rotated, template_mask)
+        if score > best_score:
+            best_score = score
+            best_angle = angle
+    return float(best_angle), best_score
+
+def calculate_angle_iou_precomputed_iou(rotated_masks: dict, template_mask: np.ndarray):
+    best_angle = None
+    best_score = -1
+    for angle, rotated in rotated_masks.items():
+        score = iou(rotated, template_mask)
+        if score > best_score:
+            best_score = score
+            best_angle = angle
+    return float(best_angle), best_score
+
+
+def find_template(mask: np.ndarray):
+
+    best_template_mask = None
+    best_angle = None
+    best_score = -1
+
+    x, y, w_c, h_c = cv2.boundingRect(cv2.findNonZero(mask))
+    mask = mask[y:y+h_c, x:x+w_c]
+
+    rotations = precompute_rotations(mask, angles=range(-30, 31))
+
+    #cv2.imwrite("img/rotations_30.png", rotations[30]*255)
+
+    for p in Path("template_masks").glob("*.*"):
+        if p.suffix.lower() not in (".png",".jpg",".jpeg",".tif",".tiff",".bmp"): continue
+        img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+        if img is None: continue
+        template_mask = (img[:,:,0] > 0).astype(np.uint8)         # булева маска
+
+
+        x2, y2, w_c2, h_c2 = cv2.boundingRect(cv2.findNonZero(template_mask))
+        template_mask = template_mask[y2:y2+h_c2, x2:x2+w_c2]
+
+        max_dim = max(512, max(mask.shape))
+        scale = max(1.0, max(template_mask.shape) / max_dim)
+        if scale > 1.0:
+            template_mask = cv2.resize(template_mask, (int(template_mask.shape[1]/scale), int(template_mask.shape[0]/scale)), interpolation=cv2.INTER_NEAREST)
+
+        mask, template_mask = normalize_masks(mask, template_mask)
+        for flip in (None, 0, 1, -1):  # orig, vert, horiz, both
+            template_mask = template_mask if flip is None else cv2.flip(template_mask, flip)
+            for template_angle in (0, 90):
+                template_mask = rotation(template_mask, template_angle)
+                for angle, rotated in rotations.items():
+                    rotated, template_mask = normalize_masks(rotated, template_mask)
+                    a_crop, b_crop = crop_to_union(rotated, template_mask)
+                    score = iou(a_crop, b_crop)
+                    if score > best_score:
+                        best_score = score
+                        best_angle = angle
+                        best_template_mask = template_mask
+                        print(best_score, angle)
+                        cv2.imwrite("img/best_template_mask.png", best_template_mask*255)
+                        cv2.imwrite("img/rotated.png", rotated*255)
+
+
+    return float(best_angle), best_template_mask
+
+
+
+def detect_sheet_angle_no_homography(warped_mask: np.ndarray) -> float:
+
+
+
+    angle, template_mask = find_template(warped_mask)
+
+    #norm_warped_mask, norm_template_mask = normalize_masks(warped_mask_cropped, template_mask_cropped)
+
+    #norm_warped_mask = rotation(norm_warped_mask, 20)
+
+    #cv2.imwrite("img/norm_warped_mask_rot.png", norm_warped_mask*255)
+    #norm_warped_mask = mask_preprocessing(norm_warped_mask)
+    #norm_warped_mask, norm_template_mask = normalize_masks(norm_warped_mask, norm_template_mask)
+
+    #calculate_angle_line_polar(norm_warped_mask, norm_template_mask)
+
+    return angle
