@@ -47,7 +47,7 @@ class VideoProcessorApp:
         else:
             print("⚠️  CUDA not available, using CPU")
         
-        json_path = r".\frames_homo.json"
+        json_path = r".\video_homo.json"
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
             H = np.array(data["homography_matrix"], dtype=np.float64)

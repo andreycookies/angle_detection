@@ -2,20 +2,37 @@ import cv2
 import numpy as np
 
 
-def mask_preprocessing(mask: np.ndarray):
+def mask_preprocessing(mask: np.ndarray) -> np.ndarray:
     m = mask.copy()
+
+    # Приводим к grayscale, если нужно
     if m.ndim == 3:
         m = cv2.cvtColor(m, cv2.COLOR_BGR2GRAY)
+    elif m.ndim != 2:
+        raise ValueError(f"Unsupported mask ndim: {m.ndim}")
 
-        # Морфологические операции — меньше итераций, адаптивно
-        k = max(3, int(round(min(m.shape[:2]) / 100)))
-        kernel = np.ones((k, k), np.uint8)
-        m = cv2.morphologyEx(m, cv2.MORPH_OPEN, kernel, iterations=1)
-        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, kernel, iterations=2)
+    # Гарантируем uint8
+    if m.dtype != np.uint8:
+        m = m.astype(np.uint8)
 
-        # Вместо размытия — контурное сглаживание
-        m = cv2.dilate(m, kernel, iterations=1)
-        m = cv2.erode(m, kernel, iterations=1)
+    # Если маска бинарная — нормализуем к 0/255
+    unique_vals = np.unique(m)
+    if len(unique_vals) <= 2:
+        m = np.where(m > 0, 255, 0).astype(np.uint8)
+
+    # --- Морфология ---
+    k = max(3, int(round(min(m.shape[:2]) / 100)))
+    kernel = np.ones((k, k), np.uint8)
+
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, kernel, iterations=1)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+    # Контурное сглаживание
+    m = cv2.dilate(m, kernel, iterations=1)
+    m = cv2.erode(m, kernel, iterations=1)
+
+    m = (m > 0).astype(np.uint8)
+
     return m
 
 
@@ -132,9 +149,9 @@ def detect_sheet_angle_no_homography(warped_mask: np.ndarray) -> float:
         right = size - w - left
         return cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
     warped_mask_cropped = pad_to_size(warped_mask_cropped, target_size)
-    cv2.imwrite("warped_mask_cropped.png", warped_mask_cropped)
+    cv2.imwrite("warped_mask_cropped.png", warped_mask_cropped * 255)
     template_mask_cropped = pad_to_size(template_mask_cropped, target_size)
-    cv2.imwrite("template_mask_cropped.png", template_mask_cropped)
+    cv2.imwrite("template_mask_cropped.png", template_mask_cropped * 255)
 
     # 3. Создаем новые src и dst, помещая кропы в центр черного квадрата
     src = np.float32(pad_to_size(warped_mask_cropped, target_size))

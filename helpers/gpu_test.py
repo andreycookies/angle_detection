@@ -4,6 +4,7 @@ import numpy as np
 from ultralytics import YOLO
 import time
 
+
 def test_gpu_performance():
     """Тестирование производительности GPU vs CPU"""
     
