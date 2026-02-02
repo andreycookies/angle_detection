@@ -1,5 +1,6 @@
 import datetime
 import json
+import os
 from collections import deque
 import torch
 import cv2
@@ -9,11 +10,13 @@ from PIL import Image, ImageTk
 import threading
 import queue
 import time
+
+from dotenv import load_dotenv
 from ultralytics import YOLO
 import numpy as np
 import math
-from homo import mask_preprocessing, has_no_ones, find_4_points, detect_sheet_angle_no_homography
-
+from homo import mask_preprocessing, has_no_ones, find_4_points, detect_sheet_angle_no_homography, find_template
+import dotenv
 
 class VideoProcessorApp:
     def __init__(self, root):
@@ -35,10 +38,20 @@ class VideoProcessorApp:
         self.display_fps_5s = 0.0
         self.inference_times = deque(maxlen=30)  # Для отслеживания времени inference
         
+        # Отслеживание частоты обнаружения масок для условного вызова find_template
+        self.mask_detection_times = deque()  # Временные метки обнаружения масок
+        self.peak_detection_rate = 0.0  # Пиковая частота обнаружения (масок в секунду)
+        self.monitoring_window = 120.0  # Окно мониторинга в секундах
+        self.rate_threshold_ratio = 0.5  # Порог "значительно реже" (50% от пика)
+        self.last_angle = 0.0  # Последний вычисленный угол
+        self.processing_start_time = None  # Время начала обработки (первое обнаружение маски)
+
         # 🔥 GPU оптимизации
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"🚀 Using device: {self.device}")
-        
+
+        load_dotenv()
+
         if torch.cuda.is_available():
             print(f"   GPU: {torch.cuda.get_device_name(0)}")
             print(f"   Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
@@ -47,7 +60,7 @@ class VideoProcessorApp:
         else:
             print("⚠️  CUDA not available, using CPU")
         
-        json_path = r".\video_homo.json"
+        json_path = os.environ['HOMOGRAPHY_PATH']
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
             H = np.array(data["homography_matrix"], dtype=np.float64)
@@ -352,6 +365,10 @@ class VideoProcessorApp:
         """Остановка обработки видео"""
         self.is_playing = False
         self.play_button.config(text="Play")
+        # Сброс статистики отслеживания масок при остановке
+        self.processing_start_time = None
+        self.mask_detection_times.clear()
+        self.peak_detection_rate = 0.0
 
     def stop_video(self):
         """Полная остановка видео"""
@@ -454,7 +471,61 @@ class VideoProcessorApp:
             cv2.imwrite("resized_mask.png", resized_mask*255)
 
             approx4, _ = find_4_points(resized_mask)
-            angle = detect_sheet_angle_no_homography(resized_mask)
+            
+            # Отслеживание частоты обнаружения масок
+            current_time = time.time()
+            
+            # Инициализируем время старта при первом обнаружении маски
+            if self.processing_start_time is None:
+                self.processing_start_time = current_time
+            
+            self.mask_detection_times.append(current_time)
+            
+            # Удаляем записи старше monitoring_window секунд
+            while self.mask_detection_times and (current_time - self.mask_detection_times[0]) > self.monitoring_window:
+                self.mask_detection_times.popleft()
+            
+            # Вычисляем текущую частоту обнаружения за последние 120 секунд
+            if len(self.mask_detection_times) > 1:
+                time_span = current_time - self.mask_detection_times[0]
+                if time_span > 0:
+                    current_rate = len(self.mask_detection_times) / time_span
+                else:
+                    current_rate = float('inf')  # Очень высокая частота при нулевом интервале
+            elif len(self.mask_detection_times) == 1:
+                # Если только одна метка, считаем минимальную частоту
+                current_rate = 1.0 / self.monitoring_window
+            else:
+                current_rate = 0.0
+            
+            # Обновляем пиковую частоту
+            if current_rate > self.peak_detection_rate:
+                self.peak_detection_rate = current_rate
+            
+            # Проверяем, прошло ли 120 секунд с момента старта
+            time_since_start = current_time - self.processing_start_time if self.processing_start_time else 0
+            
+            # Вызываем find_template только если:
+            # 1. Прошло более 120 секунд с момента старта
+            # 2. И текущая частота значительно ниже пиковой
+            should_call_find_template = False
+            if time_since_start >= self.monitoring_window:
+                if self.peak_detection_rate > 0:
+                    if current_rate < self.peak_detection_rate * self.rate_threshold_ratio:
+                        should_call_find_template = True
+                else:
+                    # Если пиковая частота еще не установлена, но прошло 120 секунд, вызываем find_template
+                    should_call_find_template = True
+
+            if should_call_find_template:
+                angle_result = find_template(resized_mask)
+                if isinstance(angle_result, tuple):
+                    angle = angle_result[0]  # Извлекаем угол из кортежа
+                else:
+                    angle = angle_result
+                self.last_angle = angle  # Сохраняем последний вычисленный угол
+            else:
+                angle, _ = find_template(resized_mask, "template_masks\mask_w1018_h650.png")
 
             self.update_statistics(angle, self.display_fps_5s)
 

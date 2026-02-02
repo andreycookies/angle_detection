@@ -282,7 +282,7 @@ def calculate_angle_iou_precomputed_iou(rotated_masks: dict, template_mask: np.n
     return float(best_angle), best_score
 
 
-def find_template(mask: np.ndarray):
+def find_template(mask: np.ndarray, default_mask_file: str = None) -> tuple:
 
     best_template_mask = None
     best_angle = None
@@ -295,12 +295,44 @@ def find_template(mask: np.ndarray):
 
     #cv2.imwrite("img/rotations_30.png", rotations[30]*255)
 
-    for p in Path("template_masks").glob("*.*"):
-        if p.suffix.lower() not in (".png",".jpg",".jpeg",".tif",".tiff",".bmp"): continue
-        img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
-        if img is None: continue
-        template_mask = (img[:,:,0] > 0).astype(np.uint8)         # булева маска
+    if default_mask_file is None:
+        for p in Path("template_masks").glob("*.*"):
+            if p.suffix.lower() not in (".png",".jpg",".jpeg",".tif",".tiff",".bmp"): continue
+            img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+            if img is None: continue
+            template_mask = (img[:,:,0] > 0).astype(np.uint8)         # булева маска
 
+
+            x2, y2, w_c2, h_c2 = cv2.boundingRect(cv2.findNonZero(template_mask))
+            template_mask = template_mask[y2:y2+h_c2, x2:x2+w_c2]
+
+            max_dim = max(512, max(mask.shape))
+            scale = max(1.0, max(template_mask.shape) / max_dim)
+            if scale > 1.0:
+                template_mask = cv2.resize(template_mask, (int(template_mask.shape[1]/scale), int(template_mask.shape[0]/scale)), interpolation=cv2.INTER_NEAREST)
+
+            mask, template_mask = normalize_masks(mask, template_mask)
+            for flip in (None, 0, 1, -1):  # orig, vert, horiz, both
+                template_mask = template_mask if flip is None else cv2.flip(template_mask, flip)
+                for template_angle in (0, 90):
+                    template_mask = rotation(template_mask, template_angle)
+                    for angle, rotated in rotations.items():
+                        rotated, template_mask = normalize_masks(rotated, template_mask)
+                        a_crop, b_crop = crop_to_union(rotated, template_mask)
+                        score = iou(a_crop, b_crop)
+
+                        if score > best_score:
+                            best_score = score
+                            best_angle = angle
+                            best_template_mask = template_mask
+
+                            print(str(p), best_score, best_angle)
+
+                            cv2.imwrite("img/best_template_mask.png", best_template_mask*255)
+                            cv2.imwrite("img/rotated.png", rotated*255)
+    elif default_mask_file is not None:
+        img = cv2.imread(default_mask_file, cv2.IMREAD_GRAYSCALE)
+        template_mask = (img[:,:,0] > 0).astype(np.uint8)         # булева маска
 
         x2, y2, w_c2, h_c2 = cv2.boundingRect(cv2.findNonZero(template_mask))
         template_mask = template_mask[y2:y2+h_c2, x2:x2+w_c2]
@@ -333,8 +365,6 @@ def find_template(mask: np.ndarray):
 
 
 def detect_sheet_angle_no_homography(warped_mask: np.ndarray) -> float:
-
-
 
     angle, template_mask = find_template(warped_mask)
 
